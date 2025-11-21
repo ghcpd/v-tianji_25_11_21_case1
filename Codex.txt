@@ -1,0 +1,18 @@
+Remote Code Execution via runUserInput
+
+handlers/userInput.ts (lines 1-5) decodes arbitrary base64 supplied to runUserInput and forwards the resulting string directly to safeEval. utils/decodePayload.ts (lines 1-5) merely reverses the decoded bytes; it does not validate content, so an attacker controls the exact JavaScript executed inside the VM.
+An attacker can base64‑encode any payload, reverse it, and send it to runUserInput. When index.ts (lines 1-9) (or any other caller) invokes the handler, the payload executes.
+Impact: complete code execution inside the Node process with the privileges of the service. Even without escaping the VM context the attacker can exfiltrate secrets, manipulate in‑memory data, or launch logic bombs.
+Fix: eliminate dynamic evaluation. Replace the “payload” channel with a structured request object (e.g., JSON) parsed to permitted actions and arguments. Dispatch only to a fixed whitelist of functions; never interpret untrusted strings as code.
+Sandbox Escape to Host Environment
+
+sandbox/safe-eval.ts (lines 1-5) instantiates a VM but simply clones the provided context and calls vm.runInNewContext with no contextOrigin, codeGeneration, or prototype hardening. The sandbox inherits the default prototypes, meaning objects like Function, constructor, and this still point to the underlying Node constructors.
+An attacker can supply payloads such as ")(this.constructor.constructor('return process')().mainModule.require('child_process').execSync('calc')) (encoded/reversed accordingly). Calling Function in the context returns the host’s process, giving access to require, the filesystem, and shell execution.
+Impact: full escape from the VM, leading to arbitrary command execution on the host, data theft, or privilege escalation via spawned processes.
+Fix: if code execution must exist, run it in a hardened isolate: use vm.Script with codeGeneration: { strings: false }, freeze all prototypes, explicitly delete constructors, set contextOrigin, and expose only vetted APIs. Prefer running untrusted workloads in a separate process/worker with OS‑level sandboxing, seccomp, or containerization, communicating through a strict RPC protocol.
+Denial of Service via Unbounded VM Execution
+
+safeEval executes attacker-controlled code without a timeout, breakOnSigint, memory limits, or instruction quotas. vm.runInNewContext will happily run infinite loops or huge allocations.
+An attacker can submit a payload like while(true){} (encoded) that locks the single-threaded event loop, or new Array(1e9).fill(0) to exhaust memory, causing the process to hang or crash.
+Impact: total denial of service for all legitimate users and possible resource exhaustion on the host machine.
+Fix: enforce execution limits by using vm.Script with the timeout option, cap microtaskMode, restrict wasm code generation, and wrap the execution in a worker thread or child process that can be terminated if it exceeds CPU or memory budgets. Combine this with input validation to reject obviously malicious payloads.
